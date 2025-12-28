@@ -1,0 +1,26 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment and secrets (NEVER commit these)
+.env
+.streamlit/secrets.toml
+
+# ChromaDB (fetched from B2 at runtime)
+data/_server/chroma_db/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# B2 download marker
+.b2_downloaded

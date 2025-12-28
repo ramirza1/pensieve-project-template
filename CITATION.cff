@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software in academic work, please cite it as below."
+title: "Pensieve: Semantic Search for Academic Notes and Papers"
+version: 0.1.0
+date-released: 2025-01-01
+license: MIT
+
+authors:
+  - family-names: Mirza
+    given-names: Rehan Ali
+    orcid: "0009-0001-6397-9194"
+
+repository-code: "https://github.com/ramirza1/pensieve-project-template"
+url: "https://pensieve-live.streamlit.app"
+
+keywords:
+  - semantic search
+  - academic research
+  - literature review
+  - vector databases
+  - research notes
+  - information retrieval
+  - LLMs
