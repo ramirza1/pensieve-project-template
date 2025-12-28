@@ -46,21 +46,14 @@ def ensure_chroma_db_from_b2() -> Path:
     if not force_download and chroma_dir.exists() and any(chroma_dir.iterdir()):
         return chroma_dir
 
-    # Get B2 credentials from Streamlit secrets (with env var fallback)
+    # Get B2 credentials from Streamlit secrets
     try:
         b2_key_id = st.secrets["B2_KEY_ID"]
         b2_app_key = st.secrets["B2_APP_KEY"]
         b2_bucket = st.secrets.get("B2_BUCKET_NAME", "pensieve-db")
         b2_prefix = st.secrets.get("B2_PREFIX", "chroma_db/")
-    except Exception:
-        # Fallback to environment variables
-        b2_key_id = os.getenv("B2_KEY_ID") or os.getenv("B2_APPLICATION_KEY_ID")
-        b2_app_key = os.getenv("B2_APP_KEY") or os.getenv("B2_APPLICATION_KEY")
-        b2_bucket = os.getenv("B2_BUCKET_NAME", "pensieve-db")
-        b2_prefix = os.getenv("B2_PREFIX", "chroma_db/")
-
-    if not b2_key_id or not b2_app_key:
-        st.error("B2 credentials not configured. Set B2_KEY_ID and B2_APP_KEY in Streamlit secrets or .env")
+    except Exception as e:
+        st.error(f"B2 credentials not configured: {e}")
         st.info("For local development, ensure data/_server/chroma_db/ exists with your indexed data.")
         st.stop()
 
@@ -201,7 +194,6 @@ def analyze_query(query: str) -> QueryAnalysis:
     analysis = QueryAnalysis(original_query=query)
     query_terms = re.findall(r'\b[a-z0-9]+\b', query.lower())
     
-    # Common academic/research concept words - customize for your domain
     concept_indicators = {
         'theory', 'effect', 'model', 'analysis', 'research', 'study',
         'reasoning', 'bias', 'cognition', 'political', 'social', 'media',
@@ -285,11 +277,6 @@ def hybrid_search(
 ) -> dict:
     """
     Perform hybrid search combining semantic + BM25 + metadata matching.
-    
-    This improves on pure semantic search by also considering:
-    - Keyword matches (BM25) for exact term matching
-    - Author name matches for author searches
-    - Title matches for topic searches
     
     Returns dict matching ChromaDB format: {documents, metadatas, distances}
     """
@@ -731,7 +718,6 @@ def render_results(
     query: str,
     ai_model: str,
     summaries: dict[str, str] | None = None,
-    debug: bool = False,
     enable_ai_snippets: bool = False,
 ):
     docs = res["documents"][0]
@@ -748,7 +734,6 @@ def render_results(
         filename = parts[-1] if parts else src
         folder = " / ".join(parts[:-1]) if len(parts) > 1 else ""
         source_type = (meta.get("source_type") or "").strip()
-        chunk_ix = meta.get("chunk_index")
         heading_path = (meta.get("heading_path") or "").strip()
         theme = (meta.get("theme") or "").strip()
         paper_title = (meta.get("paper_title") or "").strip()
@@ -769,12 +754,6 @@ def render_results(
         exp_title = f"[{i}] {display}"
         if page_str:
             exp_title += f" • {page_str}"
-
-        if debug:
-            if chunk_ix is not None:
-                exp_title += f" • chunk={chunk_ix} • d={dist:.3f}"
-            else:
-                exp_title += f" • d={dist:.3f}"
 
         if label == "NOTES":
             key = (meta.get("doc_id") or "").strip()
@@ -818,8 +797,6 @@ def render_results(
                 render_summary_text(summary_text)
             else:
                 st.markdown("_No summary found for this item yet._")
-                if debug and key:
-                    st.code(f"Expected summary id: {key}::summary")
 
             if enable_ai_snippets and query and doc_text:
                 st.markdown("<div class='pensieve-divider'></div>", unsafe_allow_html=True)
@@ -845,15 +822,9 @@ def render_results(
                             doc_text=doc_text_capped,
                         )
                     st.markdown(snippet if snippet else "_No output returned._")
-                    if debug:
-                        with st.expander("Debug: snippet cache key", expanded=False):
-                            st.code(ck)
-
-            elif debug:
-                st.markdown("_AI snippets disabled (toggle ✨ AI snippets in the top controls)._")
 
             # Show metadata expander for papers or when heading path exists
-            show_meta = (label == "PAPERS") or bool(heading_path) or debug
+            show_meta = (label == "PAPERS") or bool(heading_path)
             if show_meta:
                 st.markdown("<div class='pensieve-divider'></div>", unsafe_allow_html=True)
                 with st.expander("Metadata", expanded=False):
@@ -866,16 +837,11 @@ def render_results(
                         + _kv("Authors", meta.get("authors") or meta.get("paper_authors") or "")
                         + _kv("Year", meta.get("year") or meta.get("paper_year") or "")
                         + _kv("Doc ID", (meta.get("doc_id") or "").strip())
-                        + _kv("Chunk index", str(chunk_ix) if chunk_ix is not None else "")
-                        + _kv("Page", str(page) if page else "")
                         + "</div>"
                     )
                     if meta_html2 == "<div class='pensieve-meta'></div>":
                         meta_html2 = "<div class='pensieve-meta muted'>No extra metadata available.</div>"
                     st.markdown(meta_html2, unsafe_allow_html=True)
-                    if debug:
-                        st.markdown("**Raw meta**")
-                        st.json(meta)
 
 
 # ============================================================================
@@ -907,8 +873,6 @@ def main():
         st.stop()
 
     cfg = load_config()
-    allow_debug = bool((cfg.get("app", {}) or {}).get("allow_debug", False))
-
     repo = Path(__file__).resolve().parent.parent
 
     # Fetch DB from B2 if needed
@@ -930,16 +894,15 @@ def main():
     note_summaries = chroma.get_or_create_collection(name="note_summaries")
     paper_summaries = chroma.get_or_create_collection(name="paper_summaries")
 
-    # TODO: Update this to your GitHub repo URL
     github_url = (cfg.get("app", {}) or {}).get("github_url", "").strip()
     if not github_url:
-        github_url = "https://github.com/yourusername/pensieve"
+        github_url = "https://github.com/ramirza1/pensieve-project-template"
 
     # ---------- HERO ----------
     left, right = st.columns([2.1, 1.4], gap="large")
 
     with left:
-        h1, toggles = st.columns([4, 1.25], vertical_alignment="center")
+        h1, toggle_col = st.columns([4, 1], vertical_alignment="center")
         with h1:
             st.markdown(
                 """
@@ -947,20 +910,11 @@ def main():
                 """,
                 unsafe_allow_html=True,
             )
-        with toggles:
-            c1, c2 = st.columns([1, 1], vertical_alignment="center")
-            with c1:
-                if st.button("🌗", key="btn_theme", help="Toggle light/dark", use_container_width=True):
-                    st.session_state.theme_mode = "light" if st.session_state.theme_mode == "dark" else "dark"
-                    _persist_theme_to_query_params(st.session_state.theme_mode)
-                    st.rerun()
-            with c2:
-                if allow_debug:
-                    debug = st.toggle("🐛", key="toggle_debug", value=False, help="Debug mode")
-                else:
-                    debug = False
-                    # Keep layout stable when debug is hidden
-                    st.markdown("<div style='height: 2.2rem;'></div>", unsafe_allow_html=True)
+        with toggle_col:
+            if st.button("🌗", key="btn_theme", help="Toggle light/dark", use_container_width=True):
+                st.session_state.theme_mode = "light" if st.session_state.theme_mode == "dark" else "dark"
+                _persist_theme_to_query_params(st.session_state.theme_mode)
+                st.rerun()
 
         st.markdown(
             """
@@ -968,8 +922,8 @@ def main():
               A memory basin for <strong>papers</strong> and <strong>notes</strong>.
             </div>
             <div class="muted" style="font-size: 1.02em; line-height: 1.55; margin-bottom: 0.55em;">
-              Just like Dumbledore stored memories in the Pensieve, this tool helps you retrieve knowledge 
-              from your notes and readings—making your research instantly searchable and intelligently summarized.
+              Just like Dumbledore stored memories in the Pensieve, this is a tool I built to retrieve knowledge
+              from my notes and readings as I go along my PhD journey.
             </div>
             """,
             unsafe_allow_html=True,
@@ -978,6 +932,17 @@ def main():
             f"""
             <div class="muted" style="font-size: 0.98em; line-height: 1.4;">
               🔗 Code: <a href="{github_url}" target="_blank" rel="noopener noreferrer">{github_url}</a>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            """
+            <div class="muted" style="font-size: 0.98em; line-height: 1.4; margin-top: 0.15em;">
+            🌐 See more of my work at
+            <a href="https://rehanmirza.net/" target="_blank" rel="noopener noreferrer">
+                https://rehanmirza.net
+            </a>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1020,9 +985,6 @@ def main():
             help="Generate query-focused insights per result",
         )
 
-    if debug:
-        st.caption(f"debug: enable_ai_snippets={st.session_state.get('enable_ai_snippets')}")
-
     # ---------- QUERY ----------
     if q:
         q_emb = embed_query(oa, q, model=embed_model)
@@ -1041,7 +1003,6 @@ def main():
                 query=q,
                 ai_model=ai_model,
                 summaries=note_sum_map,
-                debug=debug,
                 enable_ai_snippets=enable_ai_snippets,
             )
 
@@ -1062,12 +1023,11 @@ def main():
                     query=q,
                     ai_model=ai_model,
                     summaries=paper_sum_map,
-                    debug=debug,
                     enable_ai_snippets=enable_ai_snippets,
                 )
 
     st.markdown("---")
-    st.caption("Built with Pensieve · Fork this template on GitHub")
+    st.caption("Made by Rehan Mirza")
 
 
 if __name__ == "__main__":
