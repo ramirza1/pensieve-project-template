@@ -28,4 +28,4 @@ retrieval:
 # App settings
 app:
   query_snippet_model: gpt-4.1-mini
-  github_url: https://github.com/yourusername/pensieve
+  github_url: https://github.com/yourusername/pensieve #update after cloning
