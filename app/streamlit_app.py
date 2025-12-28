@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import shutil
 from pathlib import Path
 import yaml
 import streamlit as st
@@ -11,94 +12,115 @@ from openai import OpenAI
 from PIL import Image
 import chromadb
 
-import json
-import textwrap
 
-print("LOADED STREAMLIT APP FROM:", __file__)
+# ---------- B2 Download Helper ----------
+@st.cache_resource(show_spinner=False)
+def ensure_chroma_db_from_b2() -> Path:
+    """
+    Ensure ChromaDB exists locally.
+    - If already present and non-empty, use it.
+    - Otherwise download it from Backblaze B2 into data/_server/chroma_db.
 
-# ---------- Deployment Mode & B2 Download ----------
-def download_chroma_from_b2():
-    """Download ChromaDB files from Backblaze B2 bucket."""
-    import subprocess
-    import tempfile
-    
-    b2_key_id = os.getenv("B2_APPLICATION_KEY_ID")
-    b2_key = os.getenv("B2_APPLICATION_KEY")
-    b2_bucket = os.getenv("B2_BUCKET_NAME")
-    
-    if not all([b2_key_id, b2_key, b2_bucket]):
-        raise ValueError("B2 credentials not fully configured. Need: B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET_NAME")
-    
-    local_chroma = Path("data/_local/chroma_db")
-    local_chroma.mkdir(parents=True, exist_ok=True)
-    
-    # Use b2 CLI to sync
-    env = os.environ.copy()
-    env["B2_APPLICATION_KEY_ID"] = b2_key_id
-    env["B2_APPLICATION_KEY"] = b2_key
-    
-    cmd = [
-        "b2", "sync",
-        f"b2://{b2_bucket}/chroma_db",
-        str(local_chroma),
-        "--skipNewer"
-    ]
-    
+    Force refresh:
+    - Set Streamlit secret FORCE_B2_DOWNLOAD="true" (or env var) to redownload.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    chroma_dir = repo / "data" / "_server" / "chroma_db"
+    marker_file = chroma_dir / ".b2_downloaded"
+
+    # Force refresh toggle (Streamlit secrets preferred; env var fallback)
+    force_download = False
     try:
-        subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)
-        print(f"✓ Synced ChromaDB from B2 bucket: {b2_bucket}")
-    except subprocess.CalledProcessError as e:
-        print(f"⚠ B2 sync failed: {e.stderr}")
-        raise
-    except FileNotFoundError:
-        print("⚠ b2 CLI not found. Install with: pip install b2")
-        raise
+        force_download = str(st.secrets.get("FORCE_B2_DOWNLOAD", "false")).strip().lower() == "true"
+    except Exception:
+        force_download = str(os.getenv("FORCE_B2_DOWNLOAD", "false")).strip().lower() == "true"
 
+    # Use existing DB if present (unless forced)
+    if not force_download and chroma_dir.exists() and any(chroma_dir.iterdir()):
+        return chroma_dir
 
-def get_deployment_mode() -> str:
-    """Determine deployment mode: 'local' or 'b2'."""
-    mode = os.getenv("DEPLOYMENT_MODE", "auto").lower()
-    
-    if mode == "auto":
-        # Auto-detect: if B2 credentials exist, use B2; otherwise local
-        if os.getenv("B2_APPLICATION_KEY_ID"):
-            return "b2"
-        return "local"
-    
-    return mode
+    # Get B2 credentials from Streamlit secrets (with env var fallback)
+    try:
+        b2_key_id = st.secrets["B2_KEY_ID"]
+        b2_app_key = st.secrets["B2_APP_KEY"]
+        b2_bucket = st.secrets.get("B2_BUCKET_NAME", "pensieve-db")
+        b2_prefix = st.secrets.get("B2_PREFIX", "chroma_db/")
+    except Exception:
+        # Fallback to environment variables
+        b2_key_id = os.getenv("B2_KEY_ID") or os.getenv("B2_APPLICATION_KEY_ID")
+        b2_app_key = os.getenv("B2_APP_KEY") or os.getenv("B2_APPLICATION_KEY")
+        b2_bucket = os.getenv("B2_BUCKET_NAME", "pensieve-db")
+        b2_prefix = os.getenv("B2_PREFIX", "chroma_db/")
 
+    if not b2_key_id or not b2_app_key:
+        st.error("B2 credentials not configured. Set B2_KEY_ID and B2_APP_KEY in Streamlit secrets or .env")
+        st.info("For local development, ensure data/_server/chroma_db/ exists with your indexed data.")
+        st.stop()
 
-def ensure_chroma_available() -> Path:
-    """Ensure ChromaDB is available locally, downloading from B2 if needed."""
-    mode = get_deployment_mode()
-    local_path = Path("data/_local/chroma_db")
-    
-    if mode == "b2":
-        # Check if we need to download
-        if not local_path.exists() or not any(local_path.iterdir()):
-            print("Downloading ChromaDB from B2...")
-            download_chroma_from_b2()
+    progress_placeholder = st.empty()
+    msg = "🧠 Refreshing Pensieve database from B2..." if force_download else "🧠 Loading Pensieve database (first load takes ~30-60 seconds)..."
+    progress_placeholder.info(msg)
+
+    try:
+        from b2sdk.v2 import B2Api, InMemoryAccountInfo
+
+        info = InMemoryAccountInfo()
+        b2_api = B2Api(info)
+        b2_api.authorize_account("production", b2_key_id, b2_app_key)
+        bucket = b2_api.get_bucket_by_name(b2_bucket)
+
+        # Clear and recreate chroma dir
+        if chroma_dir.exists():
+            shutil.rmtree(chroma_dir)
+        chroma_dir.mkdir(parents=True, exist_ok=True)
+
+        # Normalize prefix
+        if b2_prefix and not b2_prefix.endswith("/"):
+            b2_prefix = b2_prefix + "/"
+
+        file_count = 0
+
+        # Download all files under prefix
+        for file_version, _ in bucket.ls(folder_to_list=b2_prefix, recursive=True):
+            file_name = file_version.file_name
+
+            if not file_name.startswith(b2_prefix):
+                continue
+
+            local_rel = file_name[len(b2_prefix):]
+            if not local_rel:
+                continue
+
+            local_path = chroma_dir / local_rel
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            bucket.download_file_by_name(file_name).save_to(str(local_path))
+            file_count += 1
+
+        # Sanity check after download
+        if not any(chroma_dir.iterdir()):
+            progress_placeholder.error(f"Chroma dir is empty after download: {chroma_dir}")
+            st.stop()
+
+        marker_file.touch()
+        if force_download:
+            progress_placeholder.success(f"✅ Database refreshed ({file_count} files)")
         else:
-            print(f"Using cached ChromaDB at {local_path}")
-    else:
-        # Local mode - just use local path
-        if not local_path.exists():
-            local_path.mkdir(parents=True, exist_ok=True)
-            print(f"Created local ChromaDB directory at {local_path}")
-    
-    return local_path
+            progress_placeholder.success(f"✅ Database loaded ({file_count} files)")
 
+    except Exception as e:
+        progress_placeholder.error(f"Failed to download database: {e}")
+        st.stop()
 
-# Initialize on module load (will be called when Streamlit imports this)
-DEPLOYMENT_MODE = get_deployment_mode()
-print(f"Deployment mode: {DEPLOYMENT_MODE}")
+    return chroma_dir
+
 
 # ---------- Config helpers ----------
 def load_config() -> dict:
-    here = Path(__file__).resolve().parent.parent  # repo root (since file is in /app)
+    here = Path(__file__).resolve().parent.parent
     cfg_path = here / "config.yaml"
     with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
 
 def embed_query(client: OpenAI, text: str, model: str) -> list[float]:
     resp = client.embeddings.create(model=model, input=[text])
@@ -115,10 +137,6 @@ def run_query(col, q_emb: list[float], top_k: int) -> dict:
 
 # ---------- Theme persistence helpers ----------
 def _init_theme_from_query_params(default: str = "light") -> None:
-    """
-    Initialize st.session_state.theme_mode from URL query param ?theme=light|dark.
-    Falls back to default if missing/invalid.
-    """
     try:
         qp = st.query_params
         t = (qp.get("theme") or "").strip().lower()
@@ -135,7 +153,6 @@ def _persist_theme_to_query_params(theme: str) -> None:
     try:
         st.query_params["theme"] = theme
     except Exception:
-        # Older Streamlit versions or restricted environments
         pass
 
 
@@ -145,7 +162,6 @@ def _hash_text(s: str) -> str:
 
 
 def _doc_key_from_meta(meta: dict, label: str) -> str:
-    # NOTES results: doc_id; PAPERS results: source_file
     if label == "NOTES":
         return (meta.get("doc_id") or meta.get("source_file") or "unknown_doc").strip()
     return (meta.get("source_file") or meta.get("doc_id") or "unknown_doc").strip()
@@ -159,7 +175,6 @@ def _doc_label_from_meta(meta: dict, label: str) -> str:
         bits = [b for b in [title, authors, year] if b]
         return " — ".join(bits) if bits else (meta.get("source_file") or "Paper")
     else:
-        # Notes
         theme = (meta.get("theme") or "").strip()
         paper_title = (meta.get("paper_title") or meta.get("doc_anchor") or "").strip()
         paper_authors = (meta.get("paper_authors") or "").strip()
@@ -178,23 +193,15 @@ def _doc_label_from_meta(meta: dict, label: str) -> str:
 
 
 def _display_header_from_meta(meta: dict, label: str) -> str:
-    """
-    Build: Title, Authors, Year
-    - If any piece missing, omit it.
-    - If all missing, return empty string (caller will fallback to filepath).
-    """
     meta = meta or {}
-
     if label == "PAPERS":
         title = (meta.get("title") or "").strip()
         authors = (meta.get("authors") or "").strip()
         year = (meta.get("year") or "").strip()
     else:
-        # NOTES: prefer anchored paper metadata
         title = (meta.get("paper_title") or meta.get("doc_anchor") or "").strip()
         authors = (meta.get("paper_authors") or "").strip()
         year = (meta.get("paper_year") or "").strip()
-
     parts = [p for p in [title, authors, year] if p]
     return ", ".join(parts)
 
@@ -208,18 +215,12 @@ def cached_query_focused_summary(
     doc_label: str,
     doc_text: str,
 ) -> str:
-    """
-    cache_id is a precomputed key that changes if query/doc_text changes.
-    It's included so Streamlit caches the right thing.
-    """
     client = OpenAI()
-
     system = (
         "You are a careful research assistant. "
         "You must ONLY use the provided document text. "
         "If the document does not clearly address the query, say so."
     )
-
     user = f"""Query: {query}
 Document: {doc_label}
 Source type: {label}
@@ -241,7 +242,6 @@ Rules:
 DOCUMENT TEXT:
 {doc_text}
 """
-
     try:
         resp = client.responses.create(
             model=model,
@@ -264,10 +264,6 @@ DOCUMENT TEXT:
 
 # ---------- UI helpers ----------
 def inject_css(mode: str) -> None:
-    """
-    Academic Pages-ish vibe (clean, readable, text-forward), light/dark palettes.
-    IMPORTANT: In f-strings, CSS braces must be doubled: {{ ... }}.
-    """
     if mode == "dark":
         bg = "#0f111a"
         panel = "#141827"
@@ -292,52 +288,39 @@ def inject_css(mode: str) -> None:
     st.markdown(
         f"""
         <style>
-        /* Make main content truly wide */
         .block-container {{
             max-width: 1400px;
             padding-left: 3rem;
             padding-right: 3rem;
         }}
-        /* Page background + base text */
         .stApp {{
             background: {bg};
             color: {text};
         }}
-
         html, body, [class*="css"] {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
                         Roboto, Oxygen, Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
         }}
-
         a, a:visited {{
             color: {link} !important;
         }}
-
         .muted {{
             color: {muted};
         }}
-
-        /* Expander container */
         .stExpander {{
             border-radius: 12px;
             border: 1px solid {border};
             background: {panel};
         }}
-
-        /* Inputs: best-effort across Streamlit versions */
         div[data-baseweb="input"] > div {{
             background: {input_bg};
         }}
         div[data-baseweb="select"] > div {{
             background: {input_bg};
         }}
-
-        /* Make number input + select look a bit tighter */
         .stNumberInput, .stSelectbox {{
             margin-top: -2px;
         }}
-
-        /* Tiny pill button styling (theme toggle) */
         .pensieve-pill {{
             display: inline-flex;
             align-items: center;
@@ -347,8 +330,6 @@ def inject_css(mode: str) -> None:
             border: 1px solid {border};
             background: {pill_bg};
         }}
-
-        /* --- Fix expander header background (BaseWeb override) --- */
         div[data-testid="stExpander"] > details > summary {{
             background-color: transparent !important;
         }}
@@ -362,21 +343,15 @@ def inject_css(mode: str) -> None:
         div[data-testid="stExpander"] summary:hover {{
             background-color: {hover_bg} !important;
         }}
-
-        /* Compact metadata block */
         .pensieve-meta {{ margin: 0 0 0.35rem 0; }}
         .pensieve-kv {{ margin: 0.15rem 0; line-height: 1.25; }}
         .pensieve-kv .k {{ font-weight: 600; opacity: 0.9; }}
         .pensieve-kv .v {{ opacity: 0.95; }}
-
-        /* Divider */
         .pensieve-divider {{
             height: 1px;
             background: {border};
             margin: 0.55rem 0;
         }}
-
-        /* Make Streamlit buttons visible (mode-aware) */
         div.stButton > button {{
             background: {input_bg} !important;
             color: {text} !important;
@@ -396,63 +371,40 @@ def inject_css(mode: str) -> None:
 
 
 def fetch_note_summaries_by_doc_ids(col_sum, doc_ids: list[str]) -> dict[str, str]:
-    """
-    Notes summaries:
-      - stored in Chroma collection 'note_summaries'
-      - id is: f"{doc_id}::summary"
-      - meta contains: {"doc_id": ...}
-    Returns: {doc_id: markdown}
-    """
     if col_sum is None or not doc_ids:
         return {}
-
     seen = set()
     doc_ids = [d for d in doc_ids if d and not (d in seen or seen.add(d))]
-
     sids = [f"{did}::summary" for did in doc_ids]
     got = col_sum.get(ids=sids, include=["documents", "metadatas"])
-
     out: dict[str, str] = {}
     ids = got.get("ids") or []
     docs = got.get("documents") or []
     metas = got.get("metadatas") or []
-
     for sid, doc, meta in zip(ids, docs, metas):
         meta = meta or {}
         did = meta.get("doc_id") or (sid[:-len("::summary")] if sid.endswith("::summary") else sid)
         out[did] = (doc or "").strip()
-
     return out
 
 
 def fetch_paper_summaries_by_source_files(col_sum, source_files: list[str]) -> dict[str, str]:
-    """
-    Paper summaries:
-      - stored in Chroma collection 'paper_summaries'
-      - id is: f"{source_file}::summary" where source_file is rel_norm (forward slashes)
-      - meta contains: {"source_file": ...}
-    Returns: {source_file: markdown}
-    """
     if col_sum is None or not source_files:
         return {}
-
     seen = set()
     source_files = [s for s in source_files if s and not (s in seen or seen.add(s))]
-
     sids = [f"{sf}::summary" for sf in source_files]
     got = col_sum.get(ids=sids, include=["documents", "metadatas"])
-
     out: dict[str, str] = {}
     ids = got.get("ids") or []
     docs = got.get("documents") or []
     metas = got.get("metadatas") or []
-
     for sid, doc, meta in zip(ids, docs, metas):
         meta = meta or {}
         sf = meta.get("source_file") or (sid[:-len("::summary")] if sid.endswith("::summary") else sid)
         out[sf] = (doc or "").strip()
-
     return out
+
 
 def render_summary_text(summary_text: str) -> None:
     s = (summary_text or "").strip()
@@ -460,6 +412,7 @@ def render_summary_text(summary_text: str) -> None:
         st.markdown("_No summary found for this item yet._")
         return
     st.markdown(s)
+
 
 def render_results(
     label: str,
@@ -480,33 +433,26 @@ def render_results(
     for i, (doc_text, meta, dist) in enumerate(zip(docs, metas, dists), start=1):
         meta = meta or {}
         src = meta.get("source_file", "unknown")
-
         parts = src.split("/")
         filename = parts[-1] if parts else src
         folder = " / ".join(parts[:-1]) if len(parts) > 1 else ""
-
         source_type = (meta.get("source_type") or "").strip()
         chunk_ix = meta.get("chunk_index")
         heading_path = (meta.get("heading_path") or "").strip()
-
         theme = (meta.get("theme") or "").strip()
         paper_title = (meta.get("paper_title") or "").strip()
         paper_authors = (meta.get("paper_authors") or "").strip()
         paper_year = (meta.get("paper_year") or "").strip()
-
         pdf_title = (meta.get("title") or "").strip()
         pdf_authors = (meta.get("authors") or "").strip()
-
         page = meta.get("page_num")
         page_str = f"p.{page}" if page else ""
 
+        header_main = _display_header_from_meta(meta, label)
         left = folder if folder else "Notes"
         loc_line = f"{left} / {filename}" if folder else filename
         if page_str:
             loc_line += f" • {page_str}"
-
-        # prefer clean metadata header; fallback to filepath if nothing usable
-        header_main = _display_header_from_meta(meta, label)
         display = header_main if header_main else loc_line
 
         exp_title = f"[{i}] {display}"
@@ -519,12 +465,10 @@ def render_results(
             else:
                 exp_title += f" • d={dist:.3f}"
 
-        # Key to look up cached "whole-doc" summary differs by type
         if label == "NOTES":
             key = (meta.get("doc_id") or "").strip()
         else:
             key = (meta.get("source_file") or "").strip()
-
         summary_text = (summaries or {}).get(key, "")
 
         def _kv(k: str, value: str) -> str:
@@ -534,29 +478,20 @@ def render_results(
             return f"<div class='pensieve-kv'><span class='k'>{k}:</span> <span class='v'>{v}</span></div>"
 
         if source_type == "note":
-            meta_title = paper_title
-            meta_authors = paper_authors
-            meta_year = paper_year
-            meta_theme = theme
-
             body_html = (
                 "<div class='pensieve-meta'>"
-                + _kv("Theme", meta_theme)
-                + _kv("Title", meta_title)
-                + _kv("Authors", meta_authors)
-                + _kv("Year", meta_year)
+                + _kv("Theme", theme)
+                + _kv("Title", paper_title)
+                + _kv("Authors", paper_authors)
+                + _kv("Year", paper_year)
                 + "</div>"
             )
         else:
-            meta_title = pdf_title
-            meta_authors = pdf_authors
-            meta_year = (meta.get("year") or "").strip()
-
             body_html = (
                 "<div class='pensieve-meta'>"
-                + _kv("Title", meta_title)
-                + _kv("Authors", meta_authors)
-                + _kv("Year", meta_year)
+                + _kv("Title", pdf_title)
+                + _kv("Authors", pdf_authors)
+                + _kv("Year", (meta.get("year") or "").strip())
                 + "</div>"
             )
 
@@ -575,26 +510,20 @@ def render_results(
                 if debug and key:
                     st.code(f"Expected summary id: {key}::summary")
 
-            # ---------- Query-focused AI snippet ----------
             if enable_ai_snippets and query and doc_text:
                 st.markdown("<div class='pensieve-divider'></div>", unsafe_allow_html=True)
                 st.markdown("**Query-focused insights**")
-
                 doc_key = _doc_key_from_meta(meta, label)
                 doc_label = _doc_label_from_meta(meta, label)
-
                 ck = f"{_hash_text(query)}::{_hash_text(doc_key)}::{_hash_text(doc_text)}::{ai_model}"
-
                 btn_key = f"gen_qsum::{label}::{i}::{ck}"
                 if st.button("Generate / refresh", key=btn_key, use_container_width=True):
                     st.session_state[f"show_qsum::{btn_key}"] = True
                     st.rerun()
-
                 show_key = f"show_qsum::{btn_key}"
                 if st.session_state.get(show_key, False):
                     MAX_CHARS = 18000
                     doc_text_capped = doc_text[:MAX_CHARS]
-
                     with st.spinner("Summarizing…"):
                         snippet = cached_query_focused_summary(
                             ck,
@@ -604,9 +533,7 @@ def render_results(
                             doc_label=doc_label,
                             doc_text=doc_text_capped,
                         )
-
                     st.markdown(snippet if snippet else "_No output returned._")
-
                     if debug:
                         with st.expander("Debug: snippet cache key", expanded=False):
                             st.code(ck)
@@ -614,11 +541,10 @@ def render_results(
             elif debug:
                 st.markdown("_AI snippets disabled (toggle ✨ AI snippets in the top controls)._")
 
-            # ---------- Extra metadata (expandable; NOTES + PAPERS) ----------
+            # Show metadata expander for papers or when heading path exists
             show_meta = (label == "PAPERS") or bool(heading_path) or debug
             if show_meta:
                 st.markdown("<div class='pensieve-divider'></div>", unsafe_allow_html=True)
-
                 with st.expander("Metadata", expanded=False):
                     meta_html2 = (
                         "<div class='pensieve-meta'>"
@@ -633,15 +559,13 @@ def render_results(
                         + _kv("Page", str(page) if page else "")
                         + "</div>"
                     )
-
                     if meta_html2 == "<div class='pensieve-meta'></div>":
                         meta_html2 = "<div class='pensieve-meta muted'>No extra metadata available.</div>"
-
                     st.markdown(meta_html2, unsafe_allow_html=True)
-
                     if debug:
                         st.markdown("**Raw meta**")
                         st.json(meta)
+
 
 # ---------- App ----------
 def main():
@@ -650,67 +574,57 @@ def main():
         layout="wide",
     )
 
+    # Initialize theme
+    _init_theme_from_query_params()
+    inject_css(st.session_state.get("theme_mode", "light"))
+
     load_dotenv()
+
+    # Get API key from env or Streamlit secrets
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        st.error("Missing OPENAI_API_KEY in .env")
+        try:
+            api_key = st.secrets.get("OPENAI_API_KEY")
+        except Exception:
+            pass
+
+    if not api_key:
+        st.error("Missing OPENAI_API_KEY")
         st.stop()
 
     cfg = load_config()
+    allow_debug = bool((cfg.get("app", {}) or {}).get("allow_debug", False))
 
-    repo = Path(__file__).resolve().parent.parent  # repo root (/Pensieve)
+    repo = Path(__file__).resolve().parent.parent
 
-    target = (os.getenv("PENSIEVE_TARGET", "") or "").strip().lower()
-
-    def _abs(p: str | None) -> Path | None:
-        if not p:
-            return None
-        pp = Path(p)
-        return pp if pp.is_absolute() else (repo / pp)
-
-    # Use deployment-aware ChromaDB path
-    chosen_chroma = (
-        (os.getenv("PENSIEVE_CHROMA_DIR") or "").strip()
-        or str(ensure_chroma_available())
-    )
-
-    if not chosen_chroma:
-        raise KeyError(
-            "No chroma dir configured. Set PENSIEVE_CHROMA_DIR or add "
-            "paths.chroma_dir(_local/_server) in config.yaml"
-        )
-
-    chroma_dir = _abs(chosen_chroma)
+    # Fetch DB from B2 if needed
+    chroma_dir = ensure_chroma_db_from_b2()
 
     top_k_default = int(cfg["retrieval"].get("top_k", 8))
     embed_model = cfg.get("embedding_model", "text-embedding-3-small")
-
-    # model for query-focused snippets
     ai_model = ((cfg.get("app", {}) or {}).get("query_snippet_model") or "gpt-4.1-mini").strip()
 
     oa = OpenAI(api_key=api_key)
     chroma = chromadb.PersistentClient(path=str(chroma_dir))
 
-    # Main collections (doc-level retrieval)
     notes = chroma.get_or_create_collection(name="notes_docs")
     try:
         papers = chroma.get_or_create_collection(name="papers_docs")
     except Exception:
         papers = None
 
-    # Summary collections (precomputed)
     note_summaries = chroma.get_or_create_collection(name="note_summaries")
     paper_summaries = chroma.get_or_create_collection(name="paper_summaries")
 
+    # TODO: Update this to your GitHub repo URL
     github_url = (cfg.get("app", {}) or {}).get("github_url", "").strip()
     if not github_url:
-        github_url = "https://github.com/<yourname>/<yourrepo>"  # TODO
+        github_url = "https://github.com/yourusername/pensieve"
 
     # ---------- HERO ----------
     left, right = st.columns([2.1, 1.4], gap="large")
 
     with left:
-        # Header row: title + theme toggle + debug toggle
         h1, toggles = st.columns([4, 1.25], vertical_alignment="center")
         with h1:
             st.markdown(
@@ -727,14 +641,18 @@ def main():
                     _persist_theme_to_query_params(st.session_state.theme_mode)
                     st.rerun()
             with c2:
-                debug = st.toggle("🐛", key="toggle_debug", value=False, help="Debug mode")
+                if allow_debug:
+                    debug = st.toggle("🐛", key="toggle_debug", value=False, help="Debug mode")
+                else:
+                    debug = False
+                    # Keep layout stable when debug is hidden
+                    st.markdown("<div style='height: 2.2rem;'></div>", unsafe_allow_html=True)
 
         st.markdown(
             """
             <div style="font-size: 1.18em; line-height: 1.5; margin-bottom: 0.55em;">
               A memory basin for <strong>papers</strong> and <strong>notes</strong>.
             </div>
-
             <div class="muted" style="font-size: 1.02em; line-height: 1.55; margin-bottom: 0.55em;">
               Just like Dumbledore stored memories in the Pensieve, this is a tool I built to retrieve knowledge
               from my notes and readings as I go along my PhD journey.
@@ -742,7 +660,6 @@ def main():
             """,
             unsafe_allow_html=True,
         )
-
         st.markdown(
             f"""
             <div class="muted" style="font-size: 0.98em; line-height: 1.4;">
@@ -753,8 +670,10 @@ def main():
         )
 
     with right:
-        img = Image.open(repo / "assets" / "pensieve.jpg")
-        st.image(img, use_container_width=True)
+        img_path = repo / "assets" / "pensieve.jpg"
+        if img_path.exists():
+            img = Image.open(img_path)
+            st.image(img, use_container_width=True)
 
     # ---------- CONTROLS ----------
     c_search, c_notes, c_papers, c_k, c_ai = st.columns([2.6, 0.9, 0.9, 1.2, 1.4], vertical_alignment="bottom")
@@ -766,13 +685,10 @@ def main():
             label_visibility="collapsed",
             key="q",
         )
-
     with c_notes:
         use_notes = st.checkbox("📝 Notes", value=True, key="use_notes")
-
     with c_papers:
         use_papers = st.checkbox("📄 Papers", value=True, key="use_papers")
-
     with c_k:
         top_k_ui = st.number_input(
             "Number of results",
@@ -782,7 +698,6 @@ def main():
             step=1,
             key="top_k_ui",
         )
-
     with c_ai:
         enable_ai_snippets = st.checkbox(
             "✨ AI snippets",
@@ -818,7 +733,7 @@ def main():
 
         if use_papers:
             if papers is None:
-                st.warning("No 'papers_docs' collection found yet. Run: python src/index_papers.py")
+                st.warning("No 'papers_docs' collection found yet.")
             else:
                 res_papers = run_query(papers, q_emb, int(top_k_ui))
                 paper_source_files = [
@@ -838,7 +753,7 @@ def main():
                 )
 
     st.markdown("---")
-    st.caption("Made by Rehan Mirza ✨")
+    st.caption("Made by Rehan Mirza")
 
 
 if __name__ == "__main__":

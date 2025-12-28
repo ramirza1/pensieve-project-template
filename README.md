@@ -116,25 +116,28 @@ The system automatically extracts metadata (title, authors, year) from PDFs via 
 
 All settings are in `config.yaml`:
 ```yaml
-# Deployment mode: "local", "b2", or "auto"
-deployment_mode: auto
+# Embedding model (OpenAI)
+embedding_model: text-embedding-3-small
 
-# Paths
+# Paths (relative to project root)
 paths:
   notes_inbox: data/inbox/notes
   papers_inbox: data/inbox/papers
-  chroma_db: data/_local/chroma_db
   processed: data/processed
 
-# OpenAI settings
-openai:
-  embedding_model: text-embedding-3-small
-  summarization_model: gpt-4.1-mini
+# Retrieval settings
+retrieval:
+  top_k: 5
 
-# Search defaults
-search:
-  default_results: 5
-  max_results: 25
+# App settings
+app:
+  query_snippet_model: gpt-4.1-mini
+  github_url: https://github.com/yourusername/pensieve
+  allow_debug: false  # Set to true to show debug toggle
+
+# OpenAI settings (used by indexing scripts)
+openai:
+  summarization_model: gpt-4.1-mini
 ```
 
 ### Environment Variables
@@ -145,10 +148,13 @@ Create a `.env` file (copy from `.env.example`):
 OPENAI_API_KEY=sk-your-openai-api-key
 
 # Optional (only for cloud deployment)
-B2_APPLICATION_KEY_ID=your-b2-key-id
-B2_APPLICATION_KEY=your-b2-application-key
+B2_KEY_ID=your-b2-key-id
+B2_APP_KEY=your-b2-application-key
 B2_BUCKET_NAME=your-bucket-name
+B2_PREFIX=chroma_db/
 ```
+
+> **Note:** The app also accepts `B2_APPLICATION_KEY_ID` and `B2_APPLICATION_KEY` as fallback names for compatibility.
 
 ---
 
@@ -221,7 +227,7 @@ Toggle **✨ AI snippets** to enable query-focused insights:
 ### Controls
 
 - **🌗** Toggle light/dark mode
-- **🐛** Toggle debug mode (shows chunk IDs, distances, metadata)
+- **🐛** Toggle debug mode (shows chunk IDs, distances, metadata) — *only visible if `app.allow_debug: true` in config.yaml*
 
 ---
 
@@ -242,20 +248,30 @@ Want to access your Pensieve from anywhere? Deploy to the cloud:
 
 1. **Add B2 credentials to `.env`:**
 ```env
-   B2_APPLICATION_KEY_ID=your-key-id
-   B2_APPLICATION_KEY=your-key
-   B2_BUCKET_NAME=your-bucket
+B2_KEY_ID=your-key-id
+B2_APP_KEY=your-key
+B2_BUCKET_NAME=your-bucket
+B2_PREFIX=chroma_db/
 ```
 
 2. **Run the full pipeline (with upload):**
 ```bash
-   python scripts/update_and_deploy.py
+python scripts/update_and_deploy.py
 ```
 
 3. **Deploy to Streamlit Cloud:**
    - Push your repo to GitHub
    - Connect to [share.streamlit.io](https://share.streamlit.io)
-   - Add your secrets in Streamlit Cloud settings
+   - Add your secrets in Streamlit Cloud settings:
+     ```toml
+     OPENAI_API_KEY = "sk-your-key"
+     B2_KEY_ID = "your-key-id"
+     B2_APP_KEY = "your-app-key"
+     B2_BUCKET_NAME = "your-bucket"
+     B2_PREFIX = "chroma_db/"
+     # Optional: force re-download of database
+     # FORCE_B2_DOWNLOAD = "true"
+     ```
 
 ### Architecture
 ```

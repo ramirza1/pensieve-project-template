@@ -1,31 +1,25 @@
 # Pensieve Configuration
 # See README.md for full documentation
 
-# Deployment mode: "local", "b2", or "auto" (auto-detects from environment)
-deployment_mode: auto
+# Embedding model (OpenAI)
+embedding_model: text-embedding-3-small
 
 # Paths (relative to project root)
 paths:
   notes_inbox: data/inbox/notes
   papers_inbox: data/inbox/papers
-  chroma_db: data/_local/chroma_db
   processed: data/processed
 
-# OpenAI settings
-openai:
-  embedding_model: text-embedding-3-small
-  summarization_model: gpt-4.1-mini
-
-# Search settings
-search:
-  default_results: 5
-  max_results: 25
-
-# Retrieval settings (used by app)
+# Retrieval settings
 retrieval:
   top_k: 5
 
 # App settings
 app:
   query_snippet_model: gpt-4.1-mini
-  github_url: https://github.com/yourusername/pensieve #update after cloning
+  github_url: https://github.com/yourusername/pensieve  # Update after cloning
+  allow_debug: false  # Set to true to show debug toggle in UI
+
+# OpenAI settings (used by indexing scripts)
+openai:
+  summarization_model: gpt-4.1-mini
