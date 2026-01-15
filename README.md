@@ -2,7 +2,7 @@
 
 A hybrid semantic search tool for academic papers and research notes, powered by ChromaDB and OpenAI embeddings.
 
-Just like Dumbledore stored memories in the Pensieve, this tool helps you retrieve knowledge from your notes and readings—making your research instantly searchable and intelligently summarized.
+Just like Dumbledore stored memories in the Pensieve, this tool helps you retrieve knowledge from your notes and readings - making your research instantly searchable and intelligently summarized.
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pensieve-live.streamlit.app)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -30,6 +30,7 @@ Academic citation is appreciated but not required beyond the MIT License.
 ## 🚀 Quick Start (Local Mode)
 
 Get up and running in 5 minutes:
+
 ```bash
 # 1. Clone the repository
 git clone https://github.com/ramirza1/pensieve-project-template.git
@@ -42,21 +43,34 @@ source venv/bin/activate  # On Windows: .\venv\Scripts\Activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Add your OpenAI API key
+# 4. Set up your environment
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
-# Note: Costs depend on the number of documents processed, document length and chunking settings. Please monitor usage carefully.
+# Edit .env and add your OPENAI_API_KEY (remove or comment out the B2 lines)
+```
 
-# 5. Run the app
+Your `.env` file should look like this for local use:
+```env
+OPENAI_API_KEY=sk-your-openai-api-key
+
+# Comment out B2 settings for local-only use:
+# B2_KEY_ID=your-b2-key-id
+# B2_APP_KEY=your-b2-application-key
+# B2_BUCKET_NAME=your-bucket-name
+```
+
+> ⚠️ **Important:** Make sure the B2 lines are commented out (with `#`) or removed for local-only use. Otherwise the app will try to download from cloud storage.
+
+```bash
+# 5. Index your content (creates the local database)
+python scripts/update_and_deploy.py --skip-upload
+
+# 6. Run the app
 streamlit run app/streamlit_app.py
 ```
 
-The app will open at `http://localhost:8501`. 
+The app will open at `http://localhost:8501`.
 
-To index your own content, add files to `data/inbox/notes/` and `data/inbox/papers/`, then run:
-```bash
-python scripts/update_and_deploy.py --skip-upload
-```
+> **Note:** Costs depend on the number of documents processed, document length, and chunking settings. Please monitor your OpenAI usage carefully.
 
 ---
 
@@ -140,29 +154,16 @@ openai:
   summarization_model: gpt-4.1-mini
 ```
 
-### Environment Variables
-
-Create a `.env` file (copy from `.env.example`):
-```env
-# Required
-OPENAI_API_KEY=sk-your-openai-api-key
-
-# Optional (only for cloud deployment)
-B2_KEY_ID=your-b2-key-id
-B2_APP_KEY=your-b2-application-key
-B2_BUCKET_NAME=your-bucket-name
-B2_PREFIX=chroma_db/
-```
-
-> **Note:** The app also accepts `B2_APPLICATION_KEY_ID` and `B2_APPLICATION_KEY` as fallback names for compatibility.
-
 ---
 
 ## 🔧 Running the Pipeline
 
-### Index Your Content
+After adding or updating files in `data/inbox/notes/` or `data/inbox/papers/`, run the indexing pipeline:
+
+### Basic Commands
+
 ```bash
-# Full pipeline (index + summarize)
+# Full pipeline (index + summarize) - most common command
 python scripts/update_and_deploy.py --skip-upload
 
 # Only process notes
@@ -170,29 +171,33 @@ python scripts/update_and_deploy.py --notes-only --skip-upload
 
 # Only process papers
 python scripts/update_and_deploy.py --papers-only --skip-upload
+```
 
-# Preview changes without executing
+### Additional Options
+
+```bash
+# Preview what would happen without making changes
 python scripts/update_and_deploy.py --dry-run
 
 # Force full reprocess (ignore cache)
 python scripts/update_and_deploy.py --force --skip-upload
 
-# Clean up after deleting files
+# Clean up orphaned entries (after deleting source files)
 python scripts/update_and_deploy.py --cleanup --skip-upload
 ```
 
-### Command Options
+### Command Reference
 
 | Flag | Description |
 |------|-------------|
-| `--skip-upload` | Index locally only (no B2 upload) |
-| `--upload-only` | Just upload to B2 (skip indexing) |
-| `--notes-only` | Only process notes |
-| `--papers-only` | Only process papers |
-| `--cleanup` | Remove orphaned database entries |
-| `--sync-deletions` | Also delete orphaned B2 files |
-| `--dry-run` | Preview changes without executing |
+| `--skip-upload` | Index locally only (no cloud upload) — **use this for local mode** |
+| `--notes-only` | Only process notes (skip papers) |
+| `--papers-only` | Only process papers (skip notes) |
 | `--force` | Force full reprocess (ignore cache) |
+| `--cleanup` | Remove orphaned database entries |
+| `--dry-run` | Preview changes without executing |
+| `--skip-index` | Skip indexing (only summarize) |
+| `--skip-summarize` | Skip summarization (only index) |
 
 ---
 
@@ -301,8 +306,6 @@ python scripts/update_and_deploy.py
 └─────────────────────────────────────────────────────────────────┘
 ```
 
----
-
 ## 🛠️ Tech Stack
 
 | Component | Technology |
@@ -321,10 +324,6 @@ python scripts/update_and_deploy.py
 - **Python 3.10+**
 - **OpenAI API key** ([Get one here](https://platform.openai.com/api-keys))
 - **~$0.01-0.05 per paper** for embeddings and summaries (varies by length)
-
-Optional for cloud deployment:
-- Backblaze B2 account
-- Streamlit Cloud account
 
 ---
 
