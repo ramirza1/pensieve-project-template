@@ -238,47 +238,156 @@ Toggle **✨ AI snippets** to enable query-focused insights:
 
 ## ☁️ Cloud Deployment (Optional)
 
-Want to access your Pensieve from anywhere? Deploy to the cloud:
+Want to access your Pensieve from anywhere? You can deploy the app using **Backblaze B2** for cloud storage and **Streamlit Cloud** for hosting.
 
+This setup allows you to:
+- Build and update your ChromaDB locally
+- Upload the database to Backblaze B2
+- Have Streamlit Cloud download and serve the database on app startup
+
+---
+  
 ### Prerequisites
 
-1. **Backblaze B2 account** (free tier available)
-   - Create a bucket for your ChromaDB files
-   - Generate application keys
+- **Backblaze B2 account** (free tier available)
+- **Streamlit Cloud account** (free)
+- A working local Pensieve setup (local mode tested)
 
-2. **Streamlit Cloud account** (free)
-   - Connect your GitHub repository
+---
 
-### Setup
+## 1️⃣ Set up Backblaze B2 (one-time setup)
 
-1. **Add B2 credentials to `.env`:**
+### Step 1: Create a Backblaze B2 account
+
+Sign up at:  
+https://www.backblaze.com/b2/cloud-storage.html
+
+Once logged in, navigate to **B2 Cloud Storage** in the dashboard.
+
+---
+
+### Step 2: Create a private bucket
+
+1. Go to **Buckets → Create a Bucket**
+2. Choose a globally unique bucket name, for example:
+```
+   pensieve-chroma-db-test
+```
+3. Set:
+   - **Files in bucket**: Private  
+   - **Default encryption**: Enabled (recommended)  
+   - **Object Lock**: Disabled  
+
+> ⚠️ Object Lock should be **disabled** — Pensieve updates and overwrites files during reindexing.
+
+Click **Create a Bucket**.
+
+---
+
+### Step 3: Create a restricted Application Key
+
+Go to **Application Keys → Add a New Application Key** and configure it as follows:
+
+- **Key name**
+```
+  pensieve-streamlit
+```
+
+- **Allow access to bucket**
+```
+  pensieve-chroma-db-test
+```
+
+- **Type of access**
+  - ✅ Read Files  
+  - ✅ Write Files  
+  - ❌ Leave all other permissions unchecked
+
+- **File name prefix**
+```
+  chroma_db/
+```
+
+- **Expiration**
+```
+  Never
+```
+
+Create the key and **copy the credentials immediately**:
+- `keyID` → `B2_KEY_ID`
+- `applicationKey` → `B2_APP_KEY`
+
+> 🔐 Do **not** use the Master Application Key. Always use a restricted, bucket-scoped key.
+
+---
+
+## 2️⃣ Configure Pensieve for cloud upload (local)
+
+### Add B2 credentials to `.env`
+
+In your project root, update `.env`:
 ```env
-B2_KEY_ID=your-key-id
-B2_APP_KEY=your-key
-B2_BUCKET_NAME=your-bucket
+OPENAI_API_KEY=sk-your-openai-key
+
+B2_KEY_ID=your-b2-key-id
+B2_APP_KEY=your-b2-application-key
+B2_BUCKET_NAME=pensieve-chroma-db-test
 B2_PREFIX=chroma_db/
 ```
 
-2. **Run the full pipeline (with upload):**
+### Run the full pipeline (with upload)
+
+This builds the ChromaDB locally and uploads it to Backblaze B2:
 ```bash
 python scripts/update_and_deploy.py
 ```
 
-3. **Deploy to Streamlit Cloud:**
-   - Push your repo to GitHub
-   - Connect to [share.streamlit.io](https://share.streamlit.io)
-   - Add your secrets in Streamlit Cloud settings:
-     ```toml
-     OPENAI_API_KEY = "sk-your-key"
-     B2_KEY_ID = "your-key-id"
-     B2_APP_KEY = "your-app-key"
-     B2_BUCKET_NAME = "your-bucket"
-     B2_PREFIX = "chroma_db/"
-     # Optional: force re-download of database
-     # FORCE_B2_DOWNLOAD = "true"
-     ```
+You should see logs confirming:
+- Local indexing
+- Successful upload to B2
 
-### Architecture
+---
+
+## 3️⃣ Deploy to Streamlit Cloud
+
+### Step 1: Push your repository to GitHub
+
+Ensure your latest changes (including `requirements.txt`) are pushed.
+
+### Step 2: Create a Streamlit app
+
+Go to https://share.streamlit.io
+
+Connect your GitHub repository
+
+Select:
+- **Main file**: `app/streamlit_app.py`
+- **Branch**: `main` (or your preferred branch)
+
+### Step 3: Add secrets in Streamlit Cloud
+
+In **App → Settings → Secrets**, add:
+```toml
+OPENAI_API_KEY = "sk-your-openai-key"
+
+B2_KEY_ID = "your-b2-key-id"
+B2_APP_KEY = "your-b2-application-key"
+B2_BUCKET_NAME = "pensieve-chroma-db-test"
+B2_PREFIX = "chroma_db/"
+
+# Optional: force a fresh download on app start
+# FORCE_B2_DOWNLOAD = "true"
+```
+
+Restart the app.
+
+On startup, Streamlit Cloud will:
+- Download the ChromaDB from Backblaze B2
+- Serve the app using the cloud-hosted database
+
+---
+
+## 🧠 Architecture Overview
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     YOUR LOCAL MACHINE                          │
@@ -290,13 +399,13 @@ python scripts/update_and_deploy.py
 │                             │    LLM Summaries                  │
 │                             │         │                         │
 │                             │         ▼                         │
-│                             └──► Upload to B2                   │
+│                             └──► Upload to Backblaze B2         │
 └─────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                     BACKBLAZE B2                                │
-│                 (Cloud ChromaDB Storage)                        │
+│              (Cloud Storage for ChromaDB)                       │
 └─────────────────────────────────────────────────────────────────┘
                                         │
                                         ▼
