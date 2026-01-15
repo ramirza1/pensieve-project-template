@@ -1,25 +1,56 @@
 # Pensieve Configuration
 # See README.md for full documentation
 
-# Embedding model (OpenAI)
-embedding_model: text-embedding-3-small
-
-# Paths (relative to project root)
 paths:
-  notes_inbox: data/inbox/notes
-  papers_inbox: data/inbox/papers
-  processed: data/processed
+  # Source inputs
+  notes_dir: "data/inbox/notes"
+  papers_dir: "data/inbox/papers"
 
-# Retrieval settings
+  # Processed artifacts (summaries, pdf metadata cache)
+  processed_dir: "data/processed"
+
+  # ChromaDB storage
+  chroma_dir_local: "data/_local/chroma_db"
+  chroma_dir_server: "data/_server/chroma_db"
+
+  # Index registries
+  registry_local: "data/_local/index_registry.json"
+  registry_server: "data/_server/index_registry.json"
+
+
+indexing:
+  # Set to true to force full reindex
+  force_reindex_notes: false
+  force_reindex_papers: false
+
+  notes:
+    chunk_size: 2000
+    chunk_overlap: 250
+
+  papers:
+    chunk_size: 1000
+    chunk_overlap: 100
+
+
 retrieval:
-  top_k: 5
+  top_k: 8
 
-# App settings
+
 app:
-  query_snippet_model: gpt-4.1-mini
-  github_url: https://github.com/yourusername/pensieve  # Update after cloning
+  github_url: "https://github.com/yourusername/pensieve"  # Update after cloning
   allow_debug: false  # Set to true to show debug toggle in UI
 
-# OpenAI settings (used by indexing scripts)
-openai:
-  summarization_model: gpt-4.1-mini
+
+embedding_model: "text-embedding-3-small"
+
+
+summarization:
+  force_resummarize_papers: false
+  force_resummarize_notes: false
+
+  model: "gpt-4.1-mini"
+  write_summaries_to_chroma: true
+
+  # Safety valves
+  repair_bad_cached_papers_only: true
+  repair_bad_cached_notes_only: true
